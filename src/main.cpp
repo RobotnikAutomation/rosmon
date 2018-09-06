@@ -337,16 +337,12 @@ int main(int argc, char** argv)
 	// Check connectivity to ROS master
 	{
 		fmt::print("ROS_MASTER_URI: '{}'\n", ros::master::getURI());
-		if(ros::master::check())
+		while(!ros::master::check())
 		{
-			fmt::print("roscore is already running.\n");
+			fmt::print("roscore is not running yet, waiting some time.\n");
+			usleep(3*1000000);
 		}
-		else
-		{
-			fmt::print("Starting own roscore...\n");
-			fmt::print(stderr, "Scratch that, I can't do that yet. Exiting...\n");
-			return 1;
-		}
+		fmt::print("roscore is already running.\n");
 	}
 
 	ros::NodeHandle nh;
