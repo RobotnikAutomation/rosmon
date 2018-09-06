@@ -184,8 +184,16 @@ void Monitor::updateStats()
 	for(; it != end; ++it)
 	{
 		fs::path statPath = (*it) / "stat";
-		if(!fs::exists(statPath))
+		try
+		{
+			if(!fs::exists(statPath))
+				continue;
+		}
+		catch (fs::filesystem_error &e)
+		{
+			log("boost::filesystem_error", e.what());
 			continue;
+		}
 
 		process_info::ProcessStat stat;
 		if(!process_info::readStatFile(statPath.c_str(), &stat))
