@@ -191,7 +191,7 @@ void Monitor::updateStats()
 		}
 		catch (fs::filesystem_error &e)
 		{
-			log("boost::filesystem_error", e.what());
+			log("boost::filesystem_error", std::string("exception: ") + e.what() + ". Cannot acces to " + statPath.native() );
 			continue;
 		}
 
