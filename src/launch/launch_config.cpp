@@ -86,6 +86,14 @@ static bool isOnlyWhitespace(const std::string& input)
 	return true;
 }
 
+ParseContext ParseContext::enterScope(const std::string& prefix)
+{
+	ParseContext ret = *this;
+	ret.m_prefix = ros::names::clean(ret.m_prefix + prefix) + "/";
+
+	return ret;
+}
+
 std::string ParseContext::evaluate(const std::string& tpl, bool simplifyWhitespace)
 {
 	std::string simplified;
@@ -170,6 +178,13 @@ LaunchConfig::LaunchConfig()
  , m_anonGen(std::random_device()())
  , m_defaultStopTimeout(5.0)
 {
+	const char* ROS_NAMESPACE = getenv("ROS_NAMESPACE");
+	if(ROS_NAMESPACE)
+	{
+		// Someone set ROS_NAMESPACE, we should respect it.
+		// This may happen in nested situations, e.g. rosmon launching rosmon.
+		m_rootContext = m_rootContext.enterScope(ROS_NAMESPACE);
+	}
 }
 
 void LaunchConfig::setArgument(const std::string& name, const std::string& value)
@@ -552,7 +567,7 @@ void LaunchConfig::parseParam(TiXmlElement* element, ParseContext ctx, ParamCont
 		m_paramJobs[fullName] = std::async(std::launch::deferred,
 			[=]() -> XmlRpc::XmlRpcValue {
 				std::ifstream stream(fullFile, std::ios::binary | std::ios::ate);
-				if(stream.bad())
+				if(!stream)
 					throw ctx.error("Could not open file '{}'", fullFile);
 
 				std::vector<char> data(stream.tellg(), 0);
@@ -674,7 +689,7 @@ void LaunchConfig::parseParam(TiXmlElement* element, ParseContext ctx, ParamCont
 		*computeString = std::async(std::launch::deferred,
 			[=]() -> std::string {
 				std::ifstream stream(fullFile);
-				if(stream.bad())
+				if(!stream)
 					throw ctx.error("Could not open file '{}'", fullFile);
 
 				std::stringstream buffer;
@@ -776,7 +791,7 @@ void LaunchConfig::parseROSParam(TiXmlElement* element, ParseContext ctx)
 		{
 			fullFile = ctx.evaluate(file);
 			std::ifstream stream(fullFile);
-			if(stream.bad())
+			if(!stream)
 				throw ctx.error("Could not open file '{}'", fullFile);
 
 			std::stringstream buffer;
@@ -911,6 +926,23 @@ void LaunchConfig::parseInclude(TiXmlElement* element, ParseContext ctx)
 		{
 			const char* name = e->Attribute("name");
 			const char* value = e->Attribute("value");
+			const char* defaultValue = e->Attribute("default");
+
+			if(!name)
+				throw ctx.error("<arg> inside include needs a name attribute");
+
+			if(!value && defaultValue)
+			{
+				// roslaunch allows this - god knows why.
+				ctx.warning(
+					"You are using <arg> inside an <include> tag with the "
+					"default=XY attribute - which is superfluous. "
+					"Use value=XY instead for less confusion. "
+					"Attribute name: {}",
+					name
+				);
+				value = defaultValue;
+			}
 
 			if(!name || !value)
 				throw ctx.error("<arg> inside include needs name and value");

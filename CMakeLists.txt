@@ -8,6 +8,7 @@ find_package(catkin REQUIRED COMPONENTS
 	roslib
 	message_generation
 	pluginlib
+	rosfmt
 	rospack
 	rqt_gui
 	rqt_gui_cpp
@@ -27,6 +28,7 @@ generate_messages(DEPENDENCIES
 )
 
 catkin_package()
+include_directories(${catkin_INCLUDE_DIRS})
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Werror")
 
@@ -70,8 +72,6 @@ if(BUILD_FOR_COVERAGE)
 	endif()
 endif()
 
-add_subdirectory(contrib/fmt)
-
 add_library(rosmon_launch_config
 	src/launch/node.cpp
 	src/launch/launch_config.cpp
@@ -85,7 +85,6 @@ target_link_libraries(rosmon_launch_config
 	${TinyXML_LIBRARIES}
 	${Boost_LIBRARIES}
 	${Python_LIBRARIES}
-	rosmon_fmt
 	yaml-cpp
 )
 

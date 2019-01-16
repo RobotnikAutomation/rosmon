@@ -31,6 +31,7 @@
 namespace fs = boost::filesystem;
 
 bool g_shouldStop = false;
+bool g_flushStdout = false;
 
 static fs::path findFile(const fs::path& base, const std::string& name)
 {
@@ -57,20 +58,21 @@ void usage()
 		"  rosmon [actions] [options] path/to/test.launch [arg1:=value1 ...]\n"
 		"\n"
 		"Actions (default is to launch the launch file):\n"
-		"  --benchmark    Exit after loading the launch file\n"
-		"  --list-args    List launch file arguments\n"
+		"  --benchmark     Exit after loading the launch file\n"
+		"  --list-args     List launch file arguments\n"
 		"\n"
 		"Options:\n"
-		"  --disable-ui   Disable fancy terminal UI\n"
-		"  --flush-log    Flush logfile after writing an entry\n"
-		"  --help         This help screen\n"
-		"  --log=FILE     Write log file to FILE\n"
-		"  --name=NAME    Use NAME as ROS node name. By default, an anonymous\n"
-		"                 name is chosen.\n"
-		"  --no-start     Don't automatically start the nodes in the beginning\n"
+		"  --disable-ui    Disable fancy terminal UI\n"
+		"  --flush-log     Flush logfile after writing an entry\n"
+		"  --flush-stdout  Flush stdout after writing an entry\n"
+		"  --help          This help screen\n"
+		"  --log=FILE      Write log file to FILE\n"
+		"  --name=NAME     Use NAME as ROS node name. By default, an anonymous\n"
+		"                  name is chosen.\n"
+		"  --no-start      Don't automatically start the nodes in the beginning\n"
 		"  --stop-timeout=SECONDS\n"
-		"                 Kill a process if it is still running this long\n"
-		"                 after the initial signal is send.\n"
+		"                  Kill a process if it is still running this long\n"
+		"                  after the initial signal is send.\n"
 		"\n"
 		"rosmon also obeys some environment variables:\n"
 		"  ROSMON_COLOR_MODE   Can be set to 'truecolor', '256colors', 'ansi'\n"
@@ -80,7 +82,7 @@ void usage()
 	);
 }
 
-void handleSIGINT(int)
+void handleSignal(int)
 {
 	g_shouldStop = true;
 }
@@ -95,6 +97,9 @@ void logToStdout(const std::string& channel, const std::string& str)
 	clean.resize(len);
 
 	fmt::print("{:>20}: {}\n", channel, clean);
+
+	if(g_flushStdout)
+		fflush(stdout);
 }
 
 // Options
@@ -102,6 +107,7 @@ static const struct option OPTIONS[] = {
 	{"disable-ui", no_argument, nullptr, 'd'},
 	{"benchmark", no_argument, nullptr, 'b'},
 	{"flush-log", no_argument, nullptr, 'f'},
+	{"flush-stdout", no_argument, nullptr, 'F'},
 	{"help", no_argument, nullptr, 'h'},
 	{"list-args", no_argument, nullptr, 'L'},
 	{"log",  required_argument, nullptr, 'l'},
@@ -161,8 +167,12 @@ int main(int argc, char** argv)
 			case 'f':
 				flushLog = true;
 				break;
+			case 'F':
+				g_flushStdout = true;
+				break;
 			case 'S':
 				startNodes = false;
+				break;
 			case 's':
 				try
 				{
@@ -170,7 +180,7 @@ int main(int argc, char** argv)
 				}
 				catch(boost::bad_lexical_cast&)
 				{
-					fmt::print(stderr, "Bad value for --stop-timeout argument: '{}'\n");
+					fmt::print(stderr, "Bad value for --stop-timeout argument: '{}'\n", optarg);
 					return 1;
 				}
 
@@ -337,12 +347,20 @@ int main(int argc, char** argv)
 	// Check connectivity to ROS master
 	{
 		fmt::print("ROS_MASTER_URI: '{}'\n", ros::master::getURI());
-		while(!ros::master::check())
+		if(ros::master::check())
 		{
-			fmt::print("roscore is not running yet, waiting some time.\n");
-			usleep(3*1000000);
+			fmt::print("roscore is already running.\n");
 		}
-		fmt::print("roscore is already running.\n");
+		else
+		{
+			fmt::print("roscore is not runnning.\n");
+			fmt::print("Waiting until it is up (abort with CTRL+C)...\n");
+
+			while(!ros::master::check())
+				ros::WallDuration(0.5).sleep();
+
+			fmt::print("roscore is running now.\n");
+		}
 	}
 
 	ros::NodeHandle nh;
@@ -381,7 +399,10 @@ int main(int argc, char** argv)
 
 	ros::WallDuration waitDuration(0.1);
 
-	signal(SIGINT, handleSIGINT);
+	// On SIGINT, SIGTERM, SIGHUP we stop gracefully.
+	signal(SIGINT, handleSignal);
+	signal(SIGHUP, handleSignal);
+	signal(SIGTERM, handleSignal);
 
 	// Main loop
 	while(ros::ok() && monitor.ok() && !g_shouldStop)

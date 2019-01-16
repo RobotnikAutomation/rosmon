@@ -2,6 +2,28 @@
 Changelog for package rosmon
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+1.0.10 (2018-10-29)
+-------------------
+* main: exit gracefully on SIGTERM and SIGHUP as well (issue #59, PR #60)
+* launch: allow <arg default="XY"> in <include> tags (issue #57, PR #58)
+  roslaunch allows this, so we should as well. Since it seems a bit
+  confusing, we issue a warning when this happens.
+  In these cases, <arg value="XY"> should be applicable and is much clearer.
+* Contributors: Max Schwarz
+
+1.0.9 (2018-09-20)
+------------------
+* Fix race condition in integration test (issue #42, PR #54)
+* Clean namespace names properly to fix double slashes (issue #49, PR #53)
+* Respect ROS_NAMESPACE for nested launches (issue #46, PR #51)
+* gui: Sort Memory column correctly (issue #48, PR #50)
+* Try to find an executable *file* for nodes (issue #45, PR #47)
+* Add --stop-timeout option and launch file attribute (PR #37)
+* Handle params with leading slashes inside nodes (PR #40)
+* Add --no-start option (PR #39)
+* gui: Fix index bug in showContextMenu (PR #38)
+* Contributors: Max Schwarz, Nikos Skalkotos, Romain Reignier
+
 1.0.8 (2018-08-07)
 ------------------
 * main: Add option for flushing the logfile

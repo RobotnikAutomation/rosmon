@@ -120,6 +120,23 @@ TEST_CASE("param textfile", "[param]")
 	checkTypedParam<std::string>(params, "/test", XmlRpc::XmlRpcValue::TypeString, "hello_world");
 }
 
+TEST_CASE("param textfile does not exist", "[param]")
+{
+	using Catch::Matchers::Contains;
+
+	LaunchConfig config;
+	config.parseString(R"EOF(
+		<launch>
+			<param name="test" textfile="$(find rosmon)/test/textfile_does_not_exist.txt" />
+		</launch>
+	)EOF");
+
+	REQUIRE_THROWS_WITH(
+		config.evaluateParameters(),
+		Contains("file")
+	);
+}
+
 TEST_CASE("param binfile", "[param]")
 {
 	LaunchConfig config;
@@ -185,6 +202,29 @@ TEST_CASE("scoped params", "[param]")
 	checkTypedParam<std::string>(params, "/test_node/private2", XmlRpc::XmlRpcValue::TypeString, "val4");
 
 	checkTypedParam<std::string>(params, "/test_node/leading_slash", XmlRpc::XmlRpcValue::TypeString, "val5");
+}
+
+TEST_CASE("scoped params with double slash (#49)", "[param]")
+{
+	LaunchConfig config;
+	config.parseString(R"EOF(
+		<launch>
+			<group ns="/">
+				<param name="param1" value="hello" />
+			</group>
+
+			<node name="test_node" pkg="rosmon" type="abort" ns="/racecar">
+				<param name="private_param" value="hello again" />
+			</node>
+		</launch>
+	)EOF");
+
+	config.evaluateParameters();
+
+	auto& params = config.parameters();
+
+	checkTypedParam<std::string>(params, "/param1", XmlRpc::XmlRpcValue::TypeString, "hello");
+	checkTypedParam<std::string>(params, "/racecar/test_node/private_param", XmlRpc::XmlRpcValue::TypeString, "hello again");
 }
 
 TEST_CASE("wrong param types", "[param]")
