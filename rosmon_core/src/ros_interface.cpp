@@ -74,28 +74,51 @@ void ROSInterface::update()
 
 bool ROSInterface::handleStartStop(rosmon_msgs::StartStopRequest& req, rosmon_msgs::StartStopResponse&)
 {
-	auto it = std::find_if(
-		m_monitor->nodes().begin(), m_monitor->nodes().end(),
-		[&](const monitor::NodeMonitor::ConstPtr& n){ return (n->name() == req.node) && (n->namespaceString() == req.ns); }
-	);
+  // Execute the action for every node if node and ns fields are empty
+  if (req.node == "" && req.ns == "")
+  {
+    for (auto it = m_monitor->nodes().begin(); it != m_monitor->nodes().end(); it++)
+    {
+      switch (req.action)
+      {
+        case rosmon_msgs::StartStopRequest::START:
+          (*it)->start();
+          break;
+        case rosmon_msgs::StartStopRequest::STOP:
+          (*it)->stop();
+          break;
+        case rosmon_msgs::StartStopRequest::RESTART:
+          (*it)->restart();
+          break;
+      }
+    }
+  }
 
-	if(it == m_monitor->nodes().end())
-		return false;
+  else
+  {
+    auto it = std::find_if(m_monitor->nodes().begin(), m_monitor->nodes().end(),
+                           [&](const monitor::NodeMonitor::ConstPtr& n) {
+                             return (n->name() == req.node) && (n->namespaceString() == req.ns);
+                           });
 
-	switch(req.action)
-	{
-		case rosmon_msgs::StartStopRequest::START:
-			(*it)->start();
-			break;
-		case rosmon_msgs::StartStopRequest::STOP:
-			(*it)->stop();
-			break;
-		case rosmon_msgs::StartStopRequest::RESTART:
-			(*it)->restart();
-			break;
-	}
+    if (it == m_monitor->nodes().end())
+      return false;
 
-	return true;
+    switch (req.action)
+    {
+      case rosmon_msgs::StartStopRequest::START:
+        (*it)->start();
+        break;
+      case rosmon_msgs::StartStopRequest::STOP:
+        (*it)->stop();
+        break;
+      case rosmon_msgs::StartStopRequest::RESTART:
+        (*it)->restart();
+        break;
+    }
+  }
+
+  return true;
 }
 
 void ROSInterface::shutdown()
