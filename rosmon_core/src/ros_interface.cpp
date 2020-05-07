@@ -90,6 +90,8 @@ bool ROSInterface::handleStartStop(rosmon_msgs::StartStopRequest& req, rosmon_ms
         case rosmon_msgs::StartStopRequest::RESTART:
           (*it)->restart();
           break;
+        default:
+          return false;
       }
     }
   }
@@ -115,6 +117,8 @@ bool ROSInterface::handleStartStop(rosmon_msgs::StartStopRequest& req, rosmon_ms
       case rosmon_msgs::StartStopRequest::RESTART:
         (*it)->restart();
         break;
+      default:
+        return false;
     }
   }
 
