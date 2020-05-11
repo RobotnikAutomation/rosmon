@@ -445,7 +445,7 @@ int main(int argc, char** argv)
 	monitor.logMessageSignal.connect(boost::bind(&rosmon::Logger::log, logger.get(), _1));
 
 	fmt::print("\n\n");
-	monitor.setParameters();
+	// monitor.setParameters();
 
 	if(config->nodes().empty())
 	{
@@ -455,7 +455,10 @@ int main(int argc, char** argv)
 
 	// Should we automatically start the nodes?
 	if(startNodes)
+	{
+		monitor.setParameters();
 		monitor.start();
+	}
 
 	// Start the ncurses UI
 	boost::scoped_ptr<rosmon::UI> ui;
