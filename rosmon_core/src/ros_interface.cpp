@@ -122,12 +122,6 @@ bool ROSInterface::handleStartStop(rosmon_msgs::StartStopRequest& req, rosmon_ms
     }
   }
 
-  // Reload parameters if needed
-  if (req.action == rosmon_msgs::StartStopRequest::START || req.action == rosmon_msgs::StartStopRequest::RESTART)
-  {
-      m_monitor->setParameters();
-  }
-
   return true;
 }
 
