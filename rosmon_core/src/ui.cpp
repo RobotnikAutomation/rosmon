@@ -149,7 +149,8 @@ std::string UI::nodeDisplayName(monitor::NodeMonitor& node, std::size_t maxWidth
 	if(node.namespaceString().empty())
 		fullName = node.name();
 	else
-		fullName = node.namespaceString() + "/" + node.name();
+		//fullName = node.namespaceString() + "/" + node.name();
+		fullName = node.name(); // Robotnik removes the namespace to preserve the legacy behaviour
 
 	// Strip initial / to save space
 	if(!fullName.empty() && fullName[0] == '/')
