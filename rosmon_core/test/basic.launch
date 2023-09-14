@@ -36,8 +36,14 @@ yaml:
 	<!-- Test loading of empty YAML files/strings
 	  (see https://github.com/xqms/rosmon/pull/12 for discussion) -->
 	<rosparam command="load" file="$(dirname)/empty.yaml" />
-	<rosparam>
-	</rosparam>
+	<rosparam></rosparam>
+
+	<!-- Test nested global group namespace -->
+	<group ns="nested">
+		<group ns="/foo">
+			<param name="bar" value="True" />
+		</group>
+	</group>
 
 	<node name="test1" pkg="rosmon_core" type="test_node.py">
 		<remap from="~input" to="/test_input" />

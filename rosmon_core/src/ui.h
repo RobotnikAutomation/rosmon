@@ -32,15 +32,18 @@ private:
 		{}
 
 		ChannelInfo(Terminal* term)
-		 : parser{term}
+		 : stdoutParser{term}
+		 , stderrParser{term}
 		{}
 
 		ChannelInfo(Terminal* term, uint32_t color)
-		 : parser{term}
+		 : stdoutParser{term}
+		 , stderrParser{term}
 		 , labelColor(color)
 		{}
 
-		Terminal::Parser parser;
+		Terminal::Parser stdoutParser;
+		Terminal::Parser stderrParser;
 		uint32_t labelColor;
 	};
 
@@ -55,12 +58,26 @@ private:
 
 	bool anyMuted() const;
 
+	void startAll();
+
+	void stopAll();
+
 	void muteAll();
 
 	void unmuteAll();
 
+	bool stderrOnly();
+
+	void toggleStderrOnly();
+
+	void scheduleUpdate();
+
+	std::string nodeDisplayName(monitor::NodeMonitor& node, std::size_t maxWidth = std::string::npos);
+
 	monitor::Monitor* m_monitor;
 	FDWatcher::Ptr m_fdWatcher;
+	bool m_refresh_required = true;
+	bool m_stderr_only = false;
 
 	Terminal m_term;
 

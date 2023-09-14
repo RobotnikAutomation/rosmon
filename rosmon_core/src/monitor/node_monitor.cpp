@@ -25,9 +25,13 @@
 #include <boost/range.hpp>
 #include <boost/algorithm/string.hpp>
 
+#include <boost/filesystem.hpp>
+
 #include <fmt/format.h>
 
 #define TASK_COMM_LEN 16 // from linux/sched.h
+
+namespace fs = boost::filesystem;
 
 namespace
 {
@@ -76,8 +80,9 @@ namespace
 		return final_act<F>(std::forward<F>(f));
 	}
 
+	static bool g_corePatternAnalyzed = false;
 	static bool g_coreIsRelative = true;
-	static bool g_coreIsRelative_valid = false;
+	static bool g_coreIsSystemd = false;
 }
 
 namespace rosmon
@@ -85,21 +90,40 @@ namespace rosmon
 namespace monitor
 {
 
-NodeMonitor::NodeMonitor(launch::Node::ConstPtr launchNode, FDWatcher::Ptr fdWatcher, ros::NodeHandle& nh)
- : m_launchNode(std::move(launchNode))
+NodeMonitor::NodeMonitor(const launch::LaunchConfig::ConstPtr& config, const launch::Node::ConstPtr& launchNode, FDWatcher::Ptr fdWatcher, ros::NodeHandle& nh)
+ : m_launchConfig(config)
+ , m_launchNode(launchNode)
  , m_fdWatcher(std::move(fdWatcher))
- , m_rxBuffer(4096)
  , m_exitCode(0)
  , m_command(CMD_STOP) // we start in stopped state
  , m_restarting(false)
  , m_muted(m_launchNode->isMuted())
 {
+	m_stdoutParser.setCallback([&](const LogParser::Event&& src){
+		LogEvent event{fullName(), std::move(src.message)};
+		event.muted = isMuted();
+		event.type = src.severity;
+		event.channel = LogEvent::Channel::Stdout;
+		event.showStdout = m_launchNode->stdoutDisplayed();
+
+		logMessageSignal(std::move(event));
+	});
+	m_stderrParser.setCallback([&](const LogParser::Event&& src){
+		LogEvent event{fullName(), std::move(src.message)};
+		event.muted = isMuted();
+		event.type = src.severity;
+		event.channel = LogEvent::Channel::Stderr;
+
+		logMessageSignal(std::move(event));
+	});
+
+
 	m_restartTimer = nh.createWallTimer(ros::WallDuration(1.0), boost::bind(&NodeMonitor::start, this), false, false);
 	m_stopCheckTimer = nh.createWallTimer(ros::WallDuration(m_launchNode->stopTimeout()), boost::bind(&NodeMonitor::checkStop, this));
 
 	m_processWorkingDirectory = m_launchNode->workingDirectory();
 
-	if(!g_coreIsRelative_valid)
+	if(!g_corePatternAnalyzed)
 	{
 		char core_pattern[256];
 		int core_fd = open("/proc/sys/kernel/core_pattern", O_RDONLY | O_CLOEXEC);
@@ -119,7 +143,11 @@ NodeMonitor::NodeMonitor(launch::Node::ConstPtr launchNode, FDWatcher::Ptr fdWat
 		}
 
 		g_coreIsRelative = (core_pattern[0] != '/');
-		g_coreIsRelative_valid = true;
+
+		if(std::string(core_pattern).find("systemd-coredump") != std::string::npos)
+			g_coreIsSystemd = true;
+
+		g_corePatternAnalyzed = true;
 	}
 }
 
@@ -153,6 +181,30 @@ std::vector<std::string> NodeMonitor::composeCommand() const
 	// add parameter for node name
 	cmd.push_back("__name:=" + m_launchNode->name());
 
+	std::string logDir = m_launchConfig->nodeLogDir();
+	if(!logDir.empty())
+	{
+		std::string logname;
+		if(m_launchNode->namespaceString().empty())
+			logname = m_launchNode->name();
+		else
+			logname = m_launchNode->namespaceString() + "/" + m_launchNode->name();
+
+		// Strip initial / if present
+		if(!logname.empty() && logname[0] == '/')
+			logname = logname.substr(1);
+
+		// Replace all remaining / with -
+		std::replace(logname.begin(), logname.end(), '/', '-');
+
+		cmd.push_back(fmt::format("__log:={}/{}.log", logDir, logname));
+	}
+	else
+	{
+		// disable internal logging
+		cmd.push_back("__log:=/dev/null");
+	}
+
 	// and finally add remappings.
 	for(auto map : m_launchNode->remappings())
 	{
@@ -164,6 +216,14 @@ std::vector<std::string> NodeMonitor::composeCommand() const
 
 void NodeMonitor::start()
 {
+	if(m_firstStart && !m_restarting && m_launchNode->spawnDelay() != ros::WallDuration())
+	{
+		m_restartTimer.setPeriod(m_launchNode->spawnDelay());
+		m_restartTimer.start();
+		m_restarting = true;
+		return;
+	}
+
 	m_command = CMD_RUN;
 
 	m_stopCheckTimer.stop();
@@ -182,10 +242,10 @@ void NodeMonitor::start()
 		m_processWorkingDirectoryCreated = true;
 	}
 
-	ROS_INFO("rosmon: starting '%s'", m_launchNode->name().c_str());
+	ROS_INFO("rosmon: starting '%s'", fullName().c_str());
 
 	if(!m_firstStart)
-		logMessageSignal({"[rosmon]", fmt::format("Starting node {}", name()), LogEvent::Type::Info});
+		logMessageSignal({"[rosmon]", fmt::format("Starting node {}", fullName()), LogEvent::Type::Info});
 
 	m_firstStart = false;
 
@@ -198,13 +258,12 @@ void NodeMonitor::start()
 	});
 
 	// Open pseudo-terminal
-	// NOTE: We are not using forkpty() here, as it is probably not safe in
-	//  a multi-threaded process (see
-	//  https://www.linuxprogrammingblog.com/threads-and-fork-think-twice-before-using-them)
 	int master, slave;
+	std::tie(master, slave) = createPTY();
 
-	if(openpty(&master, &slave, nullptr, nullptr, nullptr) == -1)
-		throw error("Could not open pseudo terminal for child process: {}", strerror(errno));
+	// For stderr, we open a second PTY
+	int stderr_master, stderr_slave;
+	std::tie(stderr_master, stderr_slave) = createPTY();
 
 	// Compose args
 	{
@@ -214,6 +273,9 @@ void NodeMonitor::start()
 
 		args.push_back(strdup("--tty"));
 		args.push_back(strdup(fmt::format("{}", slave).c_str()));
+
+		args.push_back(strdup("--stderr"));
+		args.push_back(strdup(fmt::format("{}", stderr_slave).c_str()));
 
 		if(!m_launchNode->namespaceString().empty())
 		{
@@ -254,6 +316,7 @@ void NodeMonitor::start()
 	if(pid == 0)
 	{
 		close(master);
+		close(stderr_master);
 
 		if(execvp("rosrun", args.data()) != 0)
 		{
@@ -270,10 +333,13 @@ void NodeMonitor::start()
 
 	// Parent
 	close(slave);
+	close(stderr_slave);
 
 	m_fd = master;
+	m_stderrFD = stderr_master;
 	m_pid = pid;
 	m_fdWatcher->registerFD(m_fd, boost::bind(&NodeMonitor::communicate, this));
+	m_fdWatcher->registerFD(m_stderrFD, boost::bind(&NodeMonitor::communicateStderr, this));
 }
 
 void NodeMonitor::stop(bool restart)
@@ -289,7 +355,7 @@ void NodeMonitor::stop(bool restart)
 	if(!running())
 		return;
 
-	logMessageSignal({"[rosmon]", fmt::format("Stopping node {}", name()), LogEvent::Type::Info});
+	logMessageSignal({"[rosmon]", fmt::format("Stopping node {}", fullName()), LogEvent::Type::Info});
 
 	// kill(-pid) sends the signal to all processes in the process group
 	kill(-m_pid, SIGINT);
@@ -354,26 +420,30 @@ NodeMonitor::State NodeMonitor::state() const
 	return STATE_CRASHED;
 }
 
+void NodeMonitor::communicateStderr()
+{
+	char buf[1024];
+	int bytes = read(m_stderrFD, buf, sizeof(buf));
+
+	if(bytes == 0 || (bytes < 0 && errno == EIO))
+	{
+		// Flush out any remaining stderr
+		m_stderrParser.flush();
+
+		m_fdWatcher->removeFD(m_stderrFD);
+        close(m_stderrFD);
+        m_stderrFD = -1;
+		return; // handled in communicate()
+	}
+
+	if(bytes < 0)
+		throw error("{}: Could not read: {}", fullName(), strerror(errno));
+
+	m_stderrParser.process(buf, bytes);
+}
+
 void NodeMonitor::communicate()
 {
-	auto handleByte = [&](char c){
-		m_rxBuffer.push_back(c);
-		if(c == '\n')
-		{
-			m_rxBuffer.push_back(0);
-			m_rxBuffer.linearize();
-
-			auto one = m_rxBuffer.array_one();
-
-			LogEvent event{name(), one.first};
-			event.muted = isMuted();
-
-			logMessageSignal(std::move(event));
-
-			m_rxBuffer.clear();
-		}
-	};
-
 	char buf[1024];
 	int bytes = read(m_fd, buf, sizeof(buf));
 
@@ -389,24 +459,23 @@ void NodeMonitor::communicate()
 			if(errno == EINTR || errno == EAGAIN)
 				continue;
 
-			throw error("{}: Could not waitpid(): {}", m_launchNode->name(), strerror(errno));
+			throw error("{}: Could not waitpid(): {}", fullName(), strerror(errno));
 		}
 
 		// Flush out any remaining stdout
-		if(!m_rxBuffer.empty())
-			handleByte('\n');
+		m_stdoutParser.flush();
 
 		if(WIFEXITED(status))
 		{
 			auto type = (WEXITSTATUS(status) == 0) ? LogEvent::Type::Info : LogEvent::Type::Error;
-			logTyped(type, "{} exited with status {}", name(), WEXITSTATUS(status));
-			ROS_INFO("rosmon: %s exited with status %d", name().c_str(), WEXITSTATUS(status));
+			logTyped(type, "{} exited with status {}", fullName(), WEXITSTATUS(status));
+			ROS_INFO("rosmon: %s exited with status %d", fullName().c_str(), WEXITSTATUS(status));
 			m_exitCode = WEXITSTATUS(status);
 		}
 		else if(WIFSIGNALED(status))
 		{
-			logTyped(LogEvent::Type::Error, "{} died from signal {}", name(), WTERMSIG(status));
-			ROS_ERROR("rosmon: %s died from signal %d", name().c_str(), WTERMSIG(status));
+			logTyped(LogEvent::Type::Error, "{} died from signal {}", fullName(), WTERMSIG(status));
+			ROS_ERROR("rosmon: %s died from signal %d", fullName().c_str(), WTERMSIG(status));
 			m_exitCode = 255;
 		}
 
@@ -415,12 +484,12 @@ void NodeMonitor::communicate()
 		{
 			if(!m_launchNode->launchPrefix().empty())
 			{
-				logTyped(LogEvent::Type::Info, "{} used launch-prefix, not collecting core dump as it is probably useless.", name());
+				logTyped(LogEvent::Type::Info, "{} used launch-prefix, not collecting core dump as it is probably useless.", fullName());
 			}
 			else
 			{
 				// We have a chance to find the core dump...
-				logTyped(LogEvent::Type::Info, "{} left a core dump", name());
+				logTyped(LogEvent::Type::Info, "{} left a core dump", fullName());
 				gatherCoredump(WTERMSIG(status));
 			}
 		}
@@ -428,12 +497,38 @@ void NodeMonitor::communicate()
 
 		if(m_processWorkingDirectoryCreated)
 		{
+			// Our removal strategy is two-fold: After a process exits,
+			// we immediately try to delete the temporary working directory.
+			// If that fails (e.g. because there is a core dump in there),
+			// we remember the directory in m_lastWorkingDirectory.
+
+			// and then delete it recursively on the next process exit.
+			// That way, we always keep the last core dump around, but prevent
+			// infinite pile-up.
+			if(!m_lastWorkingDirectory.empty())
+			{
+				boost::system::error_code error;
+				boost::filesystem::remove_all(m_lastWorkingDirectory, error);
+				if(error)
+				{
+					logTyped(LogEvent::Type::Warning,
+						"Could not remove old working directory '{}' after process died twice: {}",
+						m_lastWorkingDirectory, error.message()
+					);
+				}
+
+				m_lastWorkingDirectory.clear();
+			}
+
 			if(rmdir(m_processWorkingDirectory.c_str()) != 0)
 			{
 				logTyped(LogEvent::Type::Warning, "Could not remove process working directory '{}' after process exit: {}",
 					m_processWorkingDirectory, strerror(errno)
 				);
+
+				m_lastWorkingDirectory = m_processWorkingDirectory;
 			}
+
 			m_processWorkingDirectory.clear();
 		}
 
@@ -454,30 +549,27 @@ void NodeMonitor::communicate()
 			m_restarting = true;
 		}
 
-		exitedSignal(name());
+		exitedSignal(fullName());
 
 		return;
 	}
 
 	if(bytes < 0)
-		throw error("{}: Could not read: {}", name(), strerror(errno));
+		throw error("{}: Could not read: {}", fullName(), strerror(errno));
 
-	for(int i = 0; i < bytes; ++i)
-	{
-		handleByte(buf[i]);
-	}
+	m_stdoutParser.process(buf, bytes);
 }
 
 template<typename... Args>
 void NodeMonitor::log(const char* format, Args&& ... args)
 {
-	logMessageSignal({name(), fmt::format(format, std::forward<Args>(args)...)});
+	logMessageSignal({fullName(), fmt::format(format, std::forward<Args>(args)...)});
 }
 
 template<typename... Args>
 void NodeMonitor::logTyped(LogEvent::Type type, const char* format, Args&& ... args)
 {
-	logMessageSignal({name(), fmt::format(format, std::forward<Args>(args)...), type});
+	logMessageSignal({fullName(), fmt::format(format, std::forward<Args>(args)...), type});
 }
 
 static boost::iterator_range<std::string::const_iterator>
@@ -494,6 +586,14 @@ corePatternFormatFinder(std::string::const_iterator begin, std::string::const_it
 
 void NodeMonitor::gatherCoredump(int signal)
 {
+	// If systemd-coredump is enabled, our job is easy
+	if(g_coreIsSystemd)
+	{
+		m_debuggerCommand = fmt::format("coredumpctl gdb COREDUMP_PID={}", m_pid);
+		return;
+	}
+
+	// Otherwise we have to find the core ourselves...
 	char core_pattern[256];
 	int core_fd = open("/proc/sys/kernel/core_pattern", O_RDONLY | O_CLOEXEC);
 	if(core_fd < 0)
@@ -604,6 +704,32 @@ void NodeMonitor::gatherCoredump(int signal)
 	ss << "gdb " << m_launchNode->executable() << " " << coreFile;
 
 	m_debuggerCommand = ss.str();
+}
+
+std::pair<int,int> NodeMonitor::createPTY()
+{
+	int master, slave;
+
+	// NOTE: We are not using forkpty() here, as it is probably not safe in
+	//  a multi-threaded process (see
+	//  https://www.linuxprogrammingblog.com/threads-and-fork-think-twice-before-using-them)
+
+	if(openpty(&master, &slave, nullptr, nullptr, nullptr) == -1)
+		throw error("Could not open pseudo terminal for child process: {}", strerror(errno));
+
+	// On Linux, a new unix98 pty is initialized with the output flag ONLCR set,
+	// which converts \n to \r\n
+	// Disable this bahavior by clearing the flag
+	struct termios termios;
+	if(tcgetattr(slave, &termios) == -1)
+		throw error("Could not get PTY slave attributes: {}", strerror(errno));
+
+	termios.c_oflag &= ~ONLCR;
+
+	if(tcsetattr(slave, TCSANOW, &termios) == -1)
+		throw error("Could not set PTY slave attributes: {}", strerror(errno));
+
+	return {master,slave};
 }
 
 void NodeMonitor::launchDebugger()

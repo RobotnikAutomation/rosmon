@@ -34,9 +34,67 @@ const char* UNSET_MARKER = "~~~~~ ROSMON-UNSET ~~~~~";
 ParseContext ParseContext::enterScope(const std::string& prefix)
 {
 	ParseContext ret = *this;
-	ret.m_prefix = ros::names::clean(ret.m_prefix + prefix) + "/";
+
+	const bool global_prefix = (!prefix.empty() && prefix.front() == '/');
+	ret.m_prefix = ros::names::clean(global_prefix ? prefix : (ret.m_prefix + prefix)) + "/";
 
 	return ret;
+}
+
+void ParseContext::parseScopeAttributes(TiXmlElement* e, ParseContext& attr_ctx)
+{
+	if(const char* stopTimeout = e->Attribute("rosmon-stop-timeout"))
+	{
+		double seconds;
+		try
+		{
+			seconds = boost::lexical_cast<double>(attr_ctx.evaluate(stopTimeout));
+		}
+		catch(boost::bad_lexical_cast&)
+		{
+			throw error("bad rosmon-stop-timeout value '{}'", stopTimeout);
+		}
+		if(seconds < 0)
+			throw error("negative rosmon-stop-timeout value '{}'", stopTimeout);
+
+		m_stopTimeout = seconds;
+	}
+
+	if(const char* memoryLimit = e->Attribute("rosmon-memory-limit"))
+	{
+		uint64_t memoryLimitByte;
+		bool ok;
+		std::tie(memoryLimitByte, ok) = parseMemory(static_cast<std::string>(memoryLimit));
+		if(!ok)
+		{
+			throw error("{} cannot be parsed as a memory limit", memoryLimit);
+		}
+
+		m_memoryLimit = memoryLimitByte;
+	}
+
+	if(const char* cpuLimit = e->Attribute("rosmon-cpu-limit"))
+	{
+		double cpuLimitPct;
+		try
+		{
+			cpuLimitPct = boost::lexical_cast<double>(attr_ctx.evaluate(cpuLimit));
+		}
+		catch(boost::bad_lexical_cast&)
+		{
+			throw error("bad rosmon-cpu-limit value '{}'", cpuLimit);
+		}
+
+		if(cpuLimitPct < 0)
+			throw error("negative rosmon-cpu-limit value'{}'", cpuLimit);
+
+		m_cpuLimit = cpuLimitPct;
+	}
+
+	if(const char* coredumpsEnabled = e->Attribute("enable-coredumps"))
+	{
+		m_coredumpsEnabled = attr_ctx.parseBool(coredumpsEnabled, e->Row());
+	}
 }
 
 std::string ParseContext::evaluate(const std::string& tpl, bool simplifyWhitespace)
@@ -152,17 +210,17 @@ void LaunchConfig::setArgument(const std::string& name, const std::string& value
 
 void LaunchConfig::setDefaultStopTimeout(double timeout)
 {
-    m_defaultStopTimeout = timeout;
+	m_rootContext.setStopTimeout(timeout);
 }
 
 void LaunchConfig::setDefaultCPULimit(double CPULimit)
 {
-    m_defaultCPULimit = CPULimit;
+	m_rootContext.setCPULimit(CPULimit);
 }
 
 void LaunchConfig::setDefaultMemoryLimit(uint64_t memoryLimit)
 {
-    m_defaultMemoryLimit = memoryLimit;
+	m_rootContext.setMemoryLimit(memoryLimit);
 }
 
 void LaunchConfig::parse(const std::string& filename, bool onlyArguments)
@@ -213,6 +271,20 @@ void LaunchConfig::parseString(const std::string& input, bool onlyArguments)
 		fmt::print("Loaded launch file in {:f}s\n", (ros::WallTime::now() - start).toSec());
 }
 
+void LaunchConfig::applyAutoIncrementSpawnDelayToAll(const ros::WallDuration& autoIncrementSpawnDelay)
+{
+	ros::WallDuration currentDelay(0, 0);
+
+	for(auto& node : m_nodes)
+	{
+		if(node->spawnDelay().isZero())
+		{
+			node->setSpawnDelay(currentDelay);
+			currentDelay += autoIncrementSpawnDelay;
+		}
+	}
+}
+
 void LaunchConfig::parseTopLevelAttributes(TiXmlElement* element)
 {
 	const char* name = element->Attribute("rosmon-name");
@@ -230,6 +302,8 @@ void LaunchConfig::parseTopLevelAttributes(TiXmlElement* element)
 
 void LaunchConfig::parse(TiXmlElement* element, ParseContext* ctx, bool onlyArguments)
 {
+	ctx->parseScopeAttributes(element, *ctx);
+
 	// First pass: Parse arguments
 	for(TiXmlNode* n = element->FirstChild(); n; n = n->NextSibling())
 	{
@@ -269,12 +343,12 @@ void LaunchConfig::parse(TiXmlElement* element, ParseContext* ctx, bool onlyArgu
 			parseROSParam(e, *ctx);
 		else if(e->ValueStr() == "group")
 		{
-			const char* ns = e->Attribute("ns");
-
 			ParseContext cctx = *ctx;
 
-			if(ns)
+			if(const char* ns = e->Attribute("ns"))
 				cctx = cctx.enterScope(ctx->evaluate(ns));
+
+			cctx.parseScopeAttributes(e, *ctx);
 
 			parse(e, &cctx);
 		}
@@ -296,15 +370,13 @@ void LaunchConfig::parseNode(TiXmlElement* element, ParseContext& attr_ctx)
 	const char* ns = element->Attribute("ns");
 	const char* respawn = element->Attribute("respawn");
 	const char* respawnDelay = element->Attribute("respawn_delay");
+	const char* nRespawnsAllowed = element->Attribute("rosmon-restart-warn-threshold");
 	const char* required = element->Attribute("required");
 	const char* launchPrefix = element->Attribute("launch-prefix");
-	const char* coredumpsEnabled = element->Attribute("enable-coredumps");
 	const char* cwd = element->Attribute("cwd");
 	const char* clearParams = element->Attribute("clear_params");
-	const char* stopTimeout = element->Attribute("rosmon-stop-timeout");
-	const char* memoryLimit = element->Attribute("rosmon-memory-limit");
-	const char* cpuLimit = element->Attribute("rosmon-cpu-limit");
 	const char* output = element->Attribute("output");
+	const char* spawnDelay = element->Attribute("rosmon-spawn-delay");
 
 	if(!name || !pkg || !type)
 	{
@@ -322,6 +394,9 @@ void LaunchConfig::parseNode(TiXmlElement* element, ParseContext& attr_ctx)
 	// Enter scope
 	ctx = ctx.enterScope(ctx.evaluate(name));
 
+	// Parse scoped attributes such as rosmon-stop-timeout
+	ctx.parseScopeAttributes(element, attr_ctx);
+
 	Node::Ptr node = std::make_shared<Node>(
 		attr_ctx.evaluate(name), attr_ctx.evaluate(pkg), attr_ctx.evaluate(type)
 	);
@@ -338,63 +413,10 @@ void LaunchConfig::parseNode(TiXmlElement* element, ParseContext& attr_ctx)
 		}
 	}
 
-	if(stopTimeout)
-	{
-		double seconds;
-		try
-		{
-			seconds = boost::lexical_cast<double>(attr_ctx.evaluate(stopTimeout));
-		}
-		catch(boost::bad_lexical_cast&)
-		{
-			throw ctx.error("bad rosmon-stop-timeout value '{}'", stopTimeout);
-		}
-		if(seconds < 0)
-			throw ctx.error("negative rosmon-stop-timeout value '{}'", stopTimeout);
-
-		node->setStopTimeout(seconds);
-	}
-	else
-		node->setStopTimeout(m_defaultStopTimeout);
-
-	if(memoryLimit)
-	{
-		uint64_t memoryLimitByte;
-		bool ok;
-		std::tie(memoryLimitByte, ok) = parseMemory(static_cast<std::string>(memoryLimit));
-		if(!ok)
-		{
-			throw ctx.error("{} cannot be parsed as a memory limit", memoryLimit);
-		}
-
-		node->setMemoryLimit(memoryLimitByte);
-	}
-	else
-	{
-		node->setMemoryLimit(m_defaultMemoryLimit);
-	}
-
-	if(cpuLimit)
-	{
-		double cpuLimitPct;
-		try
-		{
-			cpuLimitPct = boost::lexical_cast<double>(attr_ctx.evaluate(cpuLimit));
-		}
-		catch(boost::bad_lexical_cast&)
-		{
-			throw ctx.error("bad rosmon-cpu-limit value '{}'", cpuLimit);
-		}
-
-		if(cpuLimitPct < 0)
-			throw ctx.error("negative rosmon-cpu-limit value'{}'", cpuLimit);
-
-		node->setCPULimit(cpuLimitPct);
-	}
-	else
-	{
-		node->setCPULimit(m_defaultCPULimit);
-	}
+	node->setStopTimeout(ctx.stopTimeout());
+	node->setMemoryLimit(ctx.memoryLimit());
+	node->setCPULimit(ctx.cpuLimit());
+	node->setCoredumpsEnabled(ctx.coredumpsEnabled());
 
 	if(args)
 		node->addExtraArguments(ctx.evaluate(args));
@@ -420,6 +442,36 @@ void LaunchConfig::parseNode(TiXmlElement* element, ParseContext& attr_ctx)
 
 			node->setRespawnDelay(ros::WallDuration(seconds));
 		}
+
+		if (nRespawnsAllowed)
+		{
+			int n_respawns;
+			try
+			{
+				n_respawns = boost::lexical_cast<int>(attr_ctx.evaluate(nRespawnsAllowed));
+			}
+			catch(boost::bad_lexical_cast&)
+			{
+				throw ctx.error("bad rosmon-restart-warn-threshold value '{}'", nRespawnsAllowed);
+			}
+
+			node->setNumRespawnsAllowed(n_respawns);
+		}
+	}
+
+	if(spawnDelay)
+	{
+		double seconds;
+		try
+		{
+			seconds = boost::lexical_cast<double>(attr_ctx.evaluate(spawnDelay));
+		}
+		catch(boost::bad_lexical_cast&)
+		{
+			throw ctx.error("bad spawn_delay value '{}'", spawnDelay);
+		}
+
+		node->setSpawnDelay(ros::WallDuration(seconds));
 	}
 
 	if(required && attr_ctx.parseBool(required, element->Row()))
@@ -427,6 +479,23 @@ void LaunchConfig::parseNode(TiXmlElement* element, ParseContext& attr_ctx)
 		node->setRequired(true);
 	}
 
+	// We have to parse rosparam tags first, see #118
+	for(TiXmlNode* n = element->FirstChild(); n; n = n->NextSibling())
+	{
+		TiXmlElement* e = n->ToElement();
+		if(!e)
+			continue;
+
+		if(ctx.shouldSkip(e))
+			continue;
+
+		ctx.setCurrentElement(e);
+
+		if(e->ValueStr() == "rosparam")
+			parseROSParam(e, ctx);
+	}
+
+	// Now we can parse everything else.
 	for(TiXmlNode* n = element->FirstChild(); n; n = n->NextSibling())
 	{
 		TiXmlElement* e = n->ToElement();
@@ -440,8 +509,6 @@ void LaunchConfig::parseNode(TiXmlElement* element, ParseContext& attr_ctx)
 
 		if(e->ValueStr() == "param")
 			parseParam(e, ctx, PARAM_IN_NODE);
-		else if(e->ValueStr() == "rosparam")
-			parseROSParam(e, ctx);
 		else if(e->ValueStr() == "remap")
 			parseRemap(e, ctx);
 		else if(e->ValueStr() == "env")
@@ -456,9 +523,6 @@ void LaunchConfig::parseNode(TiXmlElement* element, ParseContext& attr_ctx)
 	if(launchPrefix)
 		node->setLaunchPrefix(attr_ctx.evaluate(launchPrefix));
 
-	if(coredumpsEnabled)
-		node->setCoredumpsEnabled(attr_ctx.parseBool(coredumpsEnabled, element->Row()));
-
 	if(cwd)
 		node->setWorkingDirectory(attr_ctx.evaluate(cwd));
 
@@ -467,18 +531,18 @@ void LaunchConfig::parseNode(TiXmlElement* element, ParseContext& attr_ctx)
 
 	if(m_outputAttrMode == OutputAttr::Obey)
 	{
-		node->setMuted(true); // output=log is default
+		node->setStdoutDisplayed(false); // output=log is default
+	}
 
-		if(output)
-		{
-			std::string outputStr = attr_ctx.evaluate(output);
-			if(outputStr == "screen")
-				node->setMuted(false);
-			else if(outputStr == "log")
-				node->setMuted(true);
-			else
-				throw ctx.error("Invalid output attribute value: '{}'", outputStr);
-		}
+	if(output)
+	{
+		std::string outputStr = attr_ctx.evaluate(output);
+		if(outputStr == "screen")
+			node->setStdoutDisplayed(true);
+		else if(outputStr == "log")
+			node->setStdoutDisplayed(false);
+		else
+			throw ctx.error("Invalid output attribute value: '{}'", outputStr);
 	}
 
 	node->setRemappings(ctx.remappings());
@@ -498,7 +562,7 @@ static XmlRpc::XmlRpcValue autoXmlRpcValue(const std::string& fullValue)
 		try { return boost::lexical_cast<int>(fullValue); }
 		catch(boost::bad_lexical_cast&) {}
 
-		try { return boost::lexical_cast<float>(fullValue); }
+		try { return boost::lexical_cast<double>(fullValue); }
 		catch(boost::bad_lexical_cast&) {}
 
 		return fullValue;
@@ -583,7 +647,15 @@ void LaunchConfig::parseParam(TiXmlElement* element, ParseContext& ctx, ParamCon
 		}
 		else
 		{
-			m_params[fullName] = paramToXmlRpc(ctx, ctx.evaluate(value), fullType);
+			// Note: roslaunch strips leading/trailing whitespace of all simple
+			// parameters. Furthermore, line feeds and tabs are replaced with
+			// space characters.
+			m_params[fullName] = paramToXmlRpc(ctx,
+				string_utils::convertWhitespace(
+					string_utils::strip(ctx.evaluate(value, false))
+				),
+				fullType
+			);
 
 			// A dynamic parameter of the same name gets overwritten now
 			m_paramJobs.erase(fullName);
@@ -625,6 +697,23 @@ void LaunchConfig::parseParam(TiXmlElement* element, ParseContext& ctx, ParamCon
 	//     case of YAML-typed parameters).
 
 	auto computeString = std::make_shared<std::future<std::string>>();
+
+	// On ROS < Lunar, type="..." is not respected for command= and textfile=
+	// attributes. We support that anyway, but print a nice warning for users.
+	// See GH issue #138.
+
+#if !ROS_VERSION_MINIMUM(1,13,0)
+	if(type)
+	{
+		ctx.warning(
+			"On ROS versions prior to Lunar, roslaunch does not respect the "
+			"type attribute on <param> tags with command= or textfile= "
+			"actions. However, rosmon does support it and will create the "
+			"properly typed parameter {}.",
+			fullName
+		);
+	}
+#endif
 
 	if(command)
 	{
@@ -782,20 +871,21 @@ XmlRpc::XmlRpcValue LaunchConfig::paramToXmlRpc(const ParseContext& ctx, const s
 	try
 	{
 		if(type == "int")
-			return boost::lexical_cast<int>(value);
+			return boost::lexical_cast<int>(string_utils::strip(value));
 		else if(type == "double")
-			return boost::lexical_cast<double>(value);
+			return boost::lexical_cast<double>(string_utils::strip(value));
 		else if(type == "bool" || type == "boolean")
 		{
-			std::string value_lowercase = boost::algorithm::to_lower_copy(value);
+			std::string value_lowercase = boost::algorithm::to_lower_copy(
+				string_utils::strip(value)
+			);
+
 			if(value_lowercase == "true")
 				return true;
 			else if(value_lowercase == "false")
 				return false;
 			else
-			{
 				throw ctx.error("invalid boolean value '{}'", value);
-			}
 		}
 		else if(type == "str" || type == "string")
 			return value;
@@ -899,10 +989,29 @@ void LaunchConfig::loadYAMLParams(const ParseContext& ctx, const YAML::Node& n, 
 	{
 		case YAML::NodeType::Map:
 		{
+			// Pass 1: Load any anchor references
 			for(YAML::const_iterator it = n.begin(); it != n.end(); ++it)
 			{
-				loadYAMLParams(ctx, it->second, prefix + "/" + it->first.as<std::string>());
+				if(it->first.as<std::string>() == "<<")
+				{
+					loadYAMLParams(ctx, it->second, prefix);
+				}
 			}
+
+			// Pass 2: Everything else.
+			for(YAML::const_iterator it = n.begin(); it != n.end(); ++it)
+			{
+				auto key = it->first.as<std::string>();
+				if(key != "<<")
+				{
+					// Load "global" params without prefix (see #130)
+					if(!key.empty() && key[0] == '/')
+						loadYAMLParams(ctx, it->second, key);
+					else
+						loadYAMLParams(ctx, it->second, prefix + "/" + it->first.as<std::string>());
+				}
+			}
+
 			break;
 		}
 		case YAML::NodeType::Sequence:
@@ -914,6 +1023,11 @@ void LaunchConfig::loadYAMLParams(const ParseContext& ctx, const YAML::Node& n, 
 			m_paramJobs.erase(prefix);
 			break;
 		}
+		case YAML::NodeType::Null:
+		{
+			// Nothing to do, empty node
+			break;
+		}
 		default:
 		{
 			throw ctx.error("invalid yaml node type");
@@ -921,12 +1035,13 @@ void LaunchConfig::loadYAMLParams(const ParseContext& ctx, const YAML::Node& n, 
 	}
 }
 
-void LaunchConfig::parseInclude(TiXmlElement* element, ParseContext ctx)
+void LaunchConfig::parseInclude(TiXmlElement* element, ParseContext& ctx)
 {
 	const char* file = element->Attribute("file");
 	const char* ns = element->Attribute("ns");
 	const char* passAllArgs = element->Attribute("pass_all_args");
 	const char* clearParams = element->Attribute("clear_params");
+	const char* importArgs = element->Attribute("rosmon-import-args");
 
 	if(!file)
 		throw ctx.error("<include> file attribute is mandatory");
@@ -943,6 +1058,7 @@ void LaunchConfig::parseInclude(TiXmlElement* element, ParseContext ctx)
 		childCtx = childCtx.enterScope(ctx.evaluate(ns));
 
 	// Parse any arguments
+	childCtx.parseScopeAttributes(element, ctx);
 
 	// If pass_all_args is not set, delete the current arguments.
 	if(!passAllArgs || !ctx.parseBool(passAllArgs, element->Row()))
@@ -994,6 +1110,13 @@ void LaunchConfig::parseInclude(TiXmlElement* element, ParseContext ctx)
 	childCtx.setFilename(fullFile);
 
 	parse(document.RootElement(), &childCtx);
+
+	// Import args from child context if requested
+	if(importArgs && ctx.parseBool(importArgs, element->Row()))
+	{
+		for(auto& pair : childCtx.arguments())
+			ctx.setArg(pair.first, pair.second, true);
+	}
 }
 
 void LaunchConfig::parseArgument(TiXmlElement* element, ParseContext& ctx)
@@ -1135,6 +1258,16 @@ void LaunchConfig::evaluateParameters()
 void LaunchConfig::setOutputAttrMode(OutputAttr mode)
 {
 	m_outputAttrMode = mode;
+}
+
+void LaunchConfig::setWarningOutput(std::ostream* output)
+{
+	m_warningOutput = output;
+}
+
+void LaunchConfig::setNodeLogDir(const std::string& dir)
+{
+	m_nodeLogDir = dir;
 }
 
 }

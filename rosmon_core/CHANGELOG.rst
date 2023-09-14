@@ -2,6 +2,75 @@
 Changelog for package rosmon_core
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+2.5.0 (2023-07-10)
+------------------
+* Fix compilation with clang (Issue #176)
+* Systemd-journal & syslog support (PR #172, issue #172)
+  Ability to log to the system journal instead of custom log files.
+  For syslog/journald logging you now have to specify --log=syslog. This
+  keeps us from breaking any old installations where users depend on
+  the logs appearing in /tmp.
+  Users who want to switch permanently to syslog/journald can do so through
+  an environment variable.
+* Auto-increment-spawn-delay feature (PR #175)
+* Add missing include to #include <boost/mpl/vector.hpp> (PR #174)
+* Hide stdout log events if output=screen and UI is disabled (PR #171)
+* Support importing args from included files (PR #169)
+* rosparam: strip whitespace inside deg() and rad() expressions (Issue #163, PR #164)
+* Contributors: Dan Ambrosio, Max Schwarz, Ramon Wijnands, Robin Vanhove, Tobias Fischer
+
+2.4.0 (2021-08-02)
+------------------
+* Support YAML merge keys inside arrays (Issue #150, PR #153)
+* Clear ONLCR o_flag on pty to avoid converting \n into \r\n (PR #152)
+* Inidicate when a node is actually Idle (e.g. stopped) (PR #144)
+* Add missing dependency on libboost-python-dev (PR #149)
+* Use a second PTY for stderr (Issue #147, PR #148)
+* Provide number of restarts threshold per node via ROS-launch arguments (Issue #145, PR #146)
+* Install tests (necessary for testing with colcon)
+* Warning for type= attrs on <param> tags on Kinetic + whitespace fixes (Issue #138, PR #141)
+* Use double precision for auto type parameters (PR #141)
+* Monitor: do not leak stderr file descriptors
+* Added option to prepend node name to stdout when using --disable-ui (Issue #139, PR #140)
+* bytes_parser: add missing include (PR #137)
+* Start all and stop all keybindings (Issue #127, PR #133)
+* Display & search full name including namespace
+* Follow symbolic links during file name suggestion (fixes completion with colcon)
+* Fix problems identified with -Wfloat-conversion
+* Respect leading slashes in rosparam YAML keys (Issue #130, PR #131)
+* Contributors: Ferry Schoenmakers, Kutay YILMAZ, Max Schwarz, Romain Reignier, Steve Golton, Tim Clephas, mcfurry
+
+2.3.2 (2020-05-29)
+------------------
+* rosmon_core: cmake: increase minimum version to address policy warnings
+* rosmon_core: *really* fix search for boost_python for python 3
+* Contributors: Max Schwarz
+
+2.3.1 (2020-05-28)
+------------------
+* Fix build issues on Debian connected to Boost & Python 3
+* Contributors: Max Schwarz
+
+2.3.0 (2020-05-28)
+------------------
+* Optionally filter stdout (INFO/DEBUG, PR #119)
+* Capture stderr separately and correctly do output=log (PR #119)
+* Prevent infinite coredump aggregation & support systemd-coredump (PR #125)
+* Support certain rosmon-* attributes on all scopes (fixes #116)
+* ui: UI DrawStatus optimized to only refresh on events (PR #121)
+* Adding fix for rosparam parsing to equivilate with undocumented behavior of roslaunch (PR #118)
+* depend on python2/3 conditioned on ROS_PYTHON_VERSION (PR #123)
+* Add YAML merge key parsing functionality (PR #117)
+* test: unit tests for the warnings we trigger
+* LaunchConfig warnings to stderr & make them captureable
+* rosmon_core: Handle empty yaml file (PR #114)
+* Improved support for nodes with terminal UI (PR #112)
+* Fix Issue "Can not handle arguments with spaces" (PR #111)
+* Option to obey output=XY tags (PR #109)
+* fix a lot of whitespace issues introduced in #76
+* Handle nesting with $(anon) subst correctly (PR #101)
+* Contributors: Carl Colena, Kazuhiro Hiratsuka, Max Schwarz, marco-tranzatto
+
 2.2.1 (2019-11-08)
 ------------------
 * correctly terminate execvp() arguments (issue: #102, PR: #103).

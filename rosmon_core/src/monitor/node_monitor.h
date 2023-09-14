@@ -5,8 +5,10 @@
 #define ROSMON_MONITOR_NODE_MONITOR_H
 
 #include "../launch/node.h"
+#include "../launch/launch_config.h"
 #include "../fd_watcher.h"
 #include "../log_event.h"
+#include "log_parser.h"
 
 #include <ros/node_handle.h>
 
@@ -45,7 +47,8 @@ public:
 	 * @param nh ros::NodeHandle to use for creating timers
 	 **/
 	NodeMonitor(
-		launch::Node::ConstPtr launchNode,
+		const launch::LaunchConfig::ConstPtr& config,
+		const launch::Node::ConstPtr& launchNode,
 		FDWatcher::Ptr fdWatcher, ros::NodeHandle& nh);
 	~NodeMonitor();
 
@@ -143,16 +146,19 @@ public:
 	 *
 	 * @return Memory usage in bytes
 	 **/
-	inline double memory() const
+	inline uint64_t memory() const
 	{ return m_memory; }
 
 	inline unsigned int restartCount() const
 	{ return m_restartCount; }
 
+	inline int numRespawnsAllowed() const
+	{ return m_launchNode->numRespawnsAllowed(); }
+
 	inline uint64_t memoryLimit() const
 	{ return m_launchNode->memoryLimitByte();}
 
-	inline float cpuLimit() const
+	inline double cpuLimit() const
 	{ return m_launchNode->cpuLimit();}
 
 	//@}
@@ -164,6 +170,12 @@ public:
 	//! Node namespace
 	inline std::string namespaceString() const
 	{ return m_launchNode->namespaceString(); }
+
+	//! Full name including namespace
+	inline std::string fullName() const
+	{
+		return namespaceString() + "/" + name();
+	}
 
 	//! Node PID
 	inline int pid() const
@@ -198,6 +210,7 @@ private:
 	std::vector<std::string> composeCommand() const;
 
 	void communicate();
+	void communicateStderr();
 
 	template<typename... Args>
 	void log(const char* format, Args&& ... args);
@@ -208,14 +221,19 @@ private:
 	void checkStop();
 	void gatherCoredump(int signal);
 
+	std::pair<int,int> createPTY();
+
+	launch::LaunchConfig::ConstPtr m_launchConfig;
 	launch::Node::ConstPtr m_launchNode;
 
 	FDWatcher::Ptr m_fdWatcher;
 
-	boost::circular_buffer<char> m_rxBuffer;
+	LogParser m_stdoutParser;
+	LogParser m_stderrParser;
 
 	int m_pid = -1;
 	int m_fd = -1;
+	int m_stderrFD = -1;
 	int m_exitCode;
 
 	ros::WallTimer m_stopCheckTimer;
@@ -236,6 +254,7 @@ private:
 	uint64_t m_memory = 0;
 
 	std::string m_processWorkingDirectory;
+	std::string m_lastWorkingDirectory;
 	bool m_processWorkingDirectoryCreated = false;
 
 	bool m_firstStart = true;

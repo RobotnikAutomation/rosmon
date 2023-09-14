@@ -19,6 +19,7 @@
 #include <iostream>
 
 #include <fmt/format.h>
+#include <fmt/chrono.h>
 
 #include "launch/launch_config.h"
 #include "launch/bytes_parser.h"
@@ -67,7 +68,7 @@ void usage()
 		"  --flush-log     Flush logfile after writing an entry\n"
 		"  --flush-stdout  Flush stdout after writing an entry\n"
 		"  --help          This help screen\n"
-		"  --log=FILE      Write log file to FILE\n"
+		"  --log=FILE      Write log file to FILE (use 'syslog' for syslog)\n"
 		"  --name=NAME     Use NAME as ROS node name. By default, an anonymous\n"
 		"                  name is chosen.\n"
 		"  --no-start      Don't automatically start the nodes in the beginning\n"
@@ -89,6 +90,10 @@ void usage()
 		"  --output-attr=obey|ignore\n"
 		"                  Obey or ignore output=\"*\" attributes on node tags.\n"
 		"                  Default is to ignore.\n"
+		"  --auto-increment-spawn-delay=SECONDS\n"
+		"                  Add SECONDS spawn delay to each process.\n"
+		"                  This is ignored for processes having 'rosmon-spawn-delay' set.\n"
+		"                  By default this is disabled.\n"
 		"\n"
 		"rosmon also obeys some environment variables:\n"
 		"  ROSMON_COLOR_MODE   Can be set to 'truecolor', '256colors', 'ansi'\n"
@@ -103,9 +108,13 @@ void handleSignal(int)
 	g_shouldStop = true;
 }
 
-void logToStdout(const rosmon::LogEvent& event)
+void logToStdout(const rosmon::LogEvent& event, const int max_width)
 {
-	std::cout << event.message;
+	// Are we supposed to show stdout?
+	if(event.channel == rosmon::LogEvent::Channel::Stdout && !event.showStdout)
+		return;
+
+	fmt::print("{:>{}}: {}", event.source, max_width, event.message);
 
 	if(!event.message.empty() && event.message.back() != '\n')
 		std::cout << '\n';
@@ -131,6 +140,7 @@ static const struct option OPTIONS[] = {
 	{"memory-limit", required_argument, nullptr, 'm'},
 	{"diagnostics-prefix", required_argument, nullptr, 'p'},
 	{"output-attr", required_argument, nullptr, 'o'},
+	{"auto-increment-spawn-delay", required_argument, nullptr, 'a'},
 	{nullptr, 0, nullptr, 0}
 };
 
@@ -139,6 +149,18 @@ enum Action {
 	ACTION_BENCHMARK,
 	ACTION_LIST_ARGS,
 };
+
+static int get_max_node_name(const rosmon::monitor::Monitor &monitor)
+{
+	std::size_t max_width = 0;
+
+	for(const auto& node : monitor.nodes())
+	{
+		max_width = std::max(max_width, node->fullName().size());
+	}
+
+	return max_width;
+}
 
 int main(int argc, char** argv)
 {
@@ -150,11 +172,12 @@ int main(int argc, char** argv)
 	bool enableUI = true;
 	bool flushLog = false;
 	bool startNodes = true;
-	double stopTimeout = rosmon::launch::LaunchConfig::DEFAULT_STOP_TIMEOUT;
-	uint64_t memoryLimit = rosmon::launch::LaunchConfig::DEFAULT_MEMORY_LIMIT;
-	float cpuLimit = rosmon::launch::LaunchConfig::DEFAULT_CPU_LIMIT;
+	double stopTimeout = rosmon::launch::DEFAULT_STOP_TIMEOUT;
+	uint64_t memoryLimit = rosmon::launch::DEFAULT_MEMORY_LIMIT;
+	float cpuLimit = rosmon::launch::DEFAULT_CPU_LIMIT;
 	bool disableDiagnostics = false;
 	std::string diagnosticsPrefix;
+	double autoIncrementSpawnDelay = -1.;
 	rosmon::launch::LaunchConfig::OutputAttr outputAttrMode = rosmon::launch::LaunchConfig::OutputAttr::Ignore;
 
 	// Parse options
@@ -258,6 +281,24 @@ int main(int argc, char** argv)
 				fmt::print(stderr, "Prefix : {}", optarg);
 				diagnosticsPrefix = std::string(optarg);
 				break;
+			case 'a':
+				fmt::print(stderr, "Auto increment spawn delay of : {} seconds\n", optarg);
+				try
+				{
+					autoIncrementSpawnDelay = boost::lexical_cast<double>(optarg);
+				}
+				catch(boost::bad_lexical_cast&)
+				{
+					fmt::print(stderr, "Bad value for --auto-increment-spawn-delay: '{}'\n", optarg);
+					return 1;
+				}
+
+				if(autoIncrementSpawnDelay < 0)
+				{
+					fmt::print(stderr, "Auto increment spawn delay cannot be negative\n");
+					return 1;
+				}
+				break;
 		}
 	}
 
@@ -314,6 +355,7 @@ int main(int argc, char** argv)
 
 	// Setup logging
 	boost::scoped_ptr<rosmon::Logger> logger;
+	std::string nodeLogPath;
 	{
 		// Setup a sane ROSCONSOLE_FORMAT if the user did not already
 		setenv("ROSCONSOLE_FORMAT", "[${function}]: ${message}", 0);
@@ -322,22 +364,46 @@ int main(int argc, char** argv)
 		ros::console::backend::function_print = nullptr;
 
 		// Open logger
-		if(logFile.empty())
+		bool envSyslog = false;
+		if(auto env = getenv("ROSMON_SYSLOG"))
+			envSyslog = (strcmp(env, "1") == 0);
+
+		if(envSyslog || logFile == "syslog")
 		{
-			// Log to /tmp by default
-
-			time_t t = time(nullptr);
-			tm currentTime;
-			memset(&currentTime, 0, sizeof(currentTime));
-			localtime_r(&t, &currentTime);
-
-			char buf[256];
-			strftime(buf, sizeof(buf), "/tmp/rosmon_%Y_%m_%d_%H_%M_%S.log", &currentTime);
-
-			logFile = buf;
+			// Try systemd journal first
+			try
+			{
+				logger.reset(new rosmon::SystemdLogger(fs::basename(launchFilePath)));
+			}
+			catch(rosmon::SystemdLogger::NotAvailable& e)
+			{
+				fmt::print(stderr, "Systemd Journal not available: {}\n", e.what());
+				logger.reset(new rosmon::SyslogLogger(fs::basename(launchFilePath)));
+			}
 		}
+		else
+		{
+			if(logFile.empty())
+			{
+				fmt::print("Tip: use --log=syslog or set environment variable ROSMON_SYSLOG=1 to send log output to syslog instead of a log file in /tmp.\n");
 
-		logger.reset(new rosmon::Logger(logFile, flushLog));
+				// Create log file in /tmp
+				std::time_t t = std::time(nullptr);
+				std::tm currentTime = fmt::localtime(t);
+
+				logFile = fmt::format("/tmp/rosmon_{:%Y_%m_%d_%H_%M_%S}.log", currentTime);
+			}
+
+			logger.reset(new rosmon::FileLogger(logFile, flushLog));
+
+			// Old-style logging means we will enable per-node log files in ~/.ros as well.
+			if(auto val = getenv("ROS_LOG_DIR"))
+				nodeLogPath = val;
+			else if(auto val = getenv("ROS_HOME"))
+				nodeLogPath = fmt::format("{}/log", val);
+			else if(auto val = getenv("HOME"))
+				nodeLogPath = fmt::format("{}/.ros/log", val);
+		}
 	}
 
 	rosmon::FDWatcher::Ptr watcher(new rosmon::FDWatcher);
@@ -394,6 +460,9 @@ int main(int argc, char** argv)
 			break;
 	}
 
+	if(autoIncrementSpawnDelay > 0.)
+		config->applyAutoIncrementSpawnDelayToAll(ros::WallDuration{autoIncrementSpawnDelay});
+
 	if(config->disableUI())
 		enableUI = false;
 
@@ -441,6 +510,18 @@ int main(int argc, char** argv)
 
 	fmt::print("Running as '{}'\n", ros::this_node::getName());
 
+	// Create node logging path
+	if(!nodeLogPath.empty())
+	{
+		std::string runID;
+		if(nh.getParam("/run_id", runID))
+			nodeLogPath = fmt::format("{}/{}", nodeLogPath, runID);
+
+		if(!fs::create_directories(nodeLogPath))
+			fmt::print(stderr, "Warning: Could not create log directory '{}'\n", nodeLogPath);
+	}
+	config->setNodeLogDir(nodeLogPath);
+
     rosmon::monitor::Monitor monitor(config, watcher);
 	monitor.logMessageSignal.connect(boost::bind(&rosmon::Logger::log, logger.get(), _1));
 
@@ -465,7 +546,11 @@ int main(int argc, char** argv)
 	}
 	else
 	{
-		monitor.logMessageSignal.connect(logToStdout);
+		monitor.logMessageSignal.connect(
+			boost::bind(
+				logToStdout,
+				_1,
+				get_max_node_name(monitor)));
 	}
 
 	// ROS interface

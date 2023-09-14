@@ -5,6 +5,7 @@
 #include "launch_config.h"
 #include "substitution.h"
 #include "substitution_python.h"
+#include "string_utils.h"
 
 #include <boost/algorithm/string/predicate.hpp>
 
@@ -46,10 +47,32 @@ XmlRpc::XmlRpcValue yamlToXmlRpc(const ParseContext& ctx, const YAML::Node& n)
 			case YAML::NodeType::Map:
 			{
 				std::map<std::string, XmlRpc::XmlRpcValue> members;
+
+				// Take care of merge keys first
 				for(YAML::const_iterator it = n.begin(); it != n.end(); ++it)
 				{
-					members[it->first.as<std::string>()] = yamlToXmlRpc(ctx, it->second);
+					auto key = it->first.as<std::string>();
+					if(key == "<<")
+					{
+						auto merger = yamlToXmlRpc(ctx, it->second);
+						if(merger.getType() != XmlRpc::XmlRpcValue::TypeStruct)
+							throw std::runtime_error{"Expected a struct here"};
+
+						for(auto& pair : merger)
+							members[pair.first] = pair.second;
+					}
 				}
+
+				// Now everything else
+				for(YAML::const_iterator it = n.begin(); it != n.end(); ++it)
+				{
+					auto key = it->first.as<std::string>();
+					if(key == "<<")
+						continue;
+
+					members[key] = yamlToXmlRpc(ctx, it->second);
+				}
+
 				return XmlRpcValueCreator::createStruct(members);
 			}
 			case YAML::NodeType::Sequence:
@@ -138,10 +161,11 @@ XmlRpc::XmlRpcValue yamlToXmlRpc(const ParseContext& ctx, const YAML::Node& n)
 
 		if(boost::starts_with(str, "deg(") && boost::ends_with(str, ")"))
 		{
+			std::string arg = string_utils::strip(str.substr(4, str.size() - 5));
 			try
 			{
 				return XmlRpc::XmlRpcValue(
-					evaluateROSParamPython(str.substr(4, str.size() - 5)) * M_PI / 180.0
+					evaluateROSParamPython(arg) * M_PI / 180.0
 				);
 			}
 			catch(SubstitutionException& e)
@@ -152,9 +176,10 @@ XmlRpc::XmlRpcValue yamlToXmlRpc(const ParseContext& ctx, const YAML::Node& n)
 
 		if(boost::starts_with(str, "rad(") && boost::ends_with(str, ")"))
 		{
+			std::string arg = string_utils::strip(str.substr(4, str.size() - 5));
 			try
 			{
-				return XmlRpc::XmlRpcValue(evaluateROSParamPython(str.substr(4, str.size() - 5)));
+				return XmlRpc::XmlRpcValue(evaluateROSParamPython(arg));
 			}
 			catch(SubstitutionException& e)
 			{
