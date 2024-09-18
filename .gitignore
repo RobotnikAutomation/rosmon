@@ -1,6 +1,7 @@
 *~
 .*
 !.gitignore
+!.github
 *.kdev4
 
 # Ignore pyc files
