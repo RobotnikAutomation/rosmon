@@ -6,6 +6,7 @@
 #include <rosmon_msgs/State.h>
 
 #include <algorithm>
+#include <regex>
 
 namespace rosmon
 {
@@ -74,55 +75,93 @@ void ROSInterface::update()
 
 bool ROSInterface::handleStartStop(rosmon_msgs::StartStopRequest& req, rosmon_msgs::StartStopResponse&)
 {
-  // Execute the action for every node if node and ns fields are empty
-  if (req.node == "" && req.ns == "")
-  {
-    for (auto it = m_monitor->nodes().begin(); it != m_monitor->nodes().end(); it++)
-    {
-      switch (req.action)
-      {
-        case rosmon_msgs::StartStopRequest::START:
-          (*it)->start();
-          break;
-        case rosmon_msgs::StartStopRequest::STOP:
-          (*it)->stop();
-          break;
-        case rosmon_msgs::StartStopRequest::RESTART:
-          (*it)->restart();
-          break;
-        default:
-          return false;
-      }
-    }
-  }
+	const auto start_stop = [&](monitor::NodeMonitor& node) {
+		switch (req.action) {
+		case rosmon_msgs::StartStopRequest::START:
+			node.start();
+			break;
+		case rosmon_msgs::StartStopRequest::STOP:
+			node.stop();
+			break;
+		case rosmon_msgs::StartStopRequest::RESTART:
+			node.restart();
+			break;
+		}
+	};
 
-  else
-  {
-    auto it = std::find_if(m_monitor->nodes().begin(), m_monitor->nodes().end(),
-                           [&](const monitor::NodeMonitor::ConstPtr& n) {
-                             return (n->name() == req.node) && (n->namespaceString() == req.ns);
-                           });
+	// remove all slashes from start and end of string
+	const auto trim = [](std::string& str) {
+		size_t start = str.find_first_not_of('/');
+		size_t end = str.find_last_not_of('/');
+		if(start == std::string::npos || end == std::string::npos || start > end)
+		{
+			str = "";
+			return;
+		}
+		str = str.substr(start, end - start + 1);
+	};
 
-    if (it == m_monitor->nodes().end())
-      return false;
+	trim(req.ns);
+	trim(req.node);
 
-    switch (req.action)
-    {
-      case rosmon_msgs::StartStopRequest::START:
-        (*it)->start();
-        break;
-      case rosmon_msgs::StartStopRequest::STOP:
-        (*it)->stop();
-        break;
-      case rosmon_msgs::StartStopRequest::RESTART:
-        (*it)->restart();
-        break;
-      default:
-        return false;
-    }
-  }
+	// execute the action for all nodes if node and ns are empty
+	if(req.node.empty() && req.ns.empty())
+	{
+		for(auto& node : m_monitor->nodes())
+			start_stop(*node);
+		return true;
+	}
 
-  return true;
+	if(req.node.empty())
+	{
+		ROS_ERROR("Got a StartStopRequest with empty node field");
+		return false;
+	}
+
+	std::string strPattern;
+
+	if(!req.ns.empty())
+	{
+		if(req.ns[0] != '/')
+			strPattern += "/";
+
+		strPattern += req.ns;
+	}
+
+	if(req.node[0] != '/')
+		strPattern += "/";
+
+	strPattern += req.node;
+
+	std::regex reg;
+	try
+	{
+		reg = std::regex(strPattern);
+	}
+	catch(const std::regex_error& e)
+	{
+		ROS_ERROR("Invalid regular expression: %s", e.what());
+		return false;
+	}
+
+	bool found = false;
+	for(auto& node : m_monitor->nodes())
+	{
+		const std::string str_name = node->namespaceString() + "/" + node->name();
+		if(std::regex_match(str_name, reg))
+		{
+			found = true;
+			start_stop(*node);
+		}
+	}
+
+	if(!found)
+	{
+		ROS_ERROR("No node matching '%s' found", strPattern.c_str());
+		return false;
+	}
+
+	return true;
 }
 
 void ROSInterface::shutdown()
